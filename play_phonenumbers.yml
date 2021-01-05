@@ -1,0 +1,98 @@
+---
+- name: INSTALL phonenumbers
+  hosts: DB_DBA
+  become: true
+
+  vars:
+    pg_v: 11
+    vip: 10.18.8.218
+    db: stat
+    db_user_pass: yfh5Hj6To1jWZDz
+    mogura_user_pass: 123456
+
+  pre_tasks:
+
+    - name: CREATE DB USER IF NOT EXISTS
+      shell: echo "SELECT 'CREATE USER {{ db }} with encrypted password ''{{ db_user_pass }}''' WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{{ db }}')\gexec" | /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+      become: yes
+      become_method: sudo
+      become_user: postgres
+
+    - name: CREATE MOGURA USER IF NOT EXISTS
+      shell: echo "SELECT 'CREATE USER mogura with encrypted password ''{{ mogura_user_pass }}''' WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'mogura')\gexec" | /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+      become: yes
+      become_method: sudo
+      become_user: postgres
+
+    - name: CREATE DB IF NOT EXISTS
+      shell: echo "SELECT 'CREATE DATABASE {{ db }} WITH OWNER = {{ db }}' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ db }}')\gexec" | /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+      become: yes
+      become_method: sudo
+      become_user: postgres
+
+  tasks:
+ 
+    - name: INSTALL pip3
+      yum: name=python3-pip state=latest update_cache=yes
+
+    - name: INSTALL phonenumbers libs
+      command: pip3 install phonenumbers
+
+    - name: CHECK file with extension plpython3
+      shell: find_fl=$(ls /usr/pgsql-{{ pg_v }}/share/extension/plpython3u.control); if [ -n "$find_fl" ]; then echo "is"; else echo "not"; fi;
+      ignore_errors: yes
+      register: is_file
+
+    - name: INSTALL libs plpython3 IF NEED
+      yum: name=postgresql{{ pg_v }}-plpython3 state=present
+      when: is_file.stdout == "not"
+
+    - name: CREATE EXTENTION plpython3u on MASTER
+      shell: sudo -u postgres /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000 -d {{ db }} -tc "CREATE EXTENSION IF NOT EXISTS plpython3u;"
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+
+    - name: CREATE EXTENTION dblink on MASTER
+      shell: sudo -u postgres /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000 -d {{ db }} -tc "CREATE EXTENSION IF NOT EXISTS dblink;"
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+ 
+    - name: COPY .sql with CREATE table and funcs
+      copy: src=./creates_phonenumbers.sql dest=/tmp/creates_phonenumbers.sql mode=0777
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+
+    - name: CREATE table and funcs on MASTER
+      shell: /usr/pgsql-{{ pg_v }}/bin/psql -h {{ vip }} -p 5000 -d {{ db }} -f '/tmp/creates_phonenumbers.sql'
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+      become: yes
+      become_method: sudo
+      become_user: postgres
+
+    - name: ADD user stat into /etc/pgbouncer/userlist.txt
+      lineinfile: dest=/etc/pgbouncer/userlist.txt line='"{{ db }}" "{{ db_user_pass }}"' regexp='"{{ db }}" "{{ db_user_pass }}"' insertafter='EOF'
+      
+    - name: SETUP CRON
+      cron:
+        name: Phonenumbers every 3h
+        minute: "0"
+        hour: "*/3"
+        user: root
+        job: /usr/pgsql-{{ pg_v }}/bin/psql -U postgres -h {{ vip }} -p 5000 -d {{ db }} -tc "select public.load_squirrel_list_profile();"
+      delegate_to: "{{ groups['DB_DBA'][0] }}"
+      run_once: yes
+
+- name: UPDATE MOGURA REPORT WITH NEW CLUSTER VIP
+  hosts: mogura
+  become: true
+
+  tasks:
+   - name: MAKE UPDATE using variable vip
+     shell: psql -U pgsql -d mogura -tc "update public.reports_report set sql=replace(sql,(substring(sql,(strpos(sql,'host=')+5),strpos(sql,'port=')-(strpos(sql,'host=')+5))),'{{ vip }} ') where id=595;"
